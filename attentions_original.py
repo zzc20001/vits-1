@@ -5,49 +5,31 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-# 注意：确保 commons.py 和 modules.py 在当前目录下，否则会导入失败
 import commons
 import modules
 from modules import LayerNorm
+import torch
+import torch.nn as nn
 
-# 定义低秩线性层（先定义，避免NameError）
+# 定义低秩线性层
 class LowRankLinear(nn.Module):
-    def __init__(self, in_channels, out_channels, rank):
-        super().__init__()
-        # 只 new 一次，地址固定
-        self.W1 = nn.Conv1d(in_channels, rank,   1, bias=False)
-        self.W2 = nn.Conv1d(rank,   out_channels, 1, bias=False)
+    def __init__(self, in_features, out_features, r=32):
+        super(LowRankLinear, self).__init__()
+        # 合法性校验
+        self.r = min(r, in_features, out_features)  # 秩不能超过输入/输出特征数
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # 低秩分解：W = W1 @ W2（W1: in_features×r, W2: r×out_features）
+        self.W1 = nn.Linear(in_features, self.r, bias=False)
+        self.W2 = nn.Linear(self.r, out_features, bias=True)
+        # 初始化偏置（和原生Linear一致）
+        nn.init.zeros_(self.W2.bias)
 
     def forward(self, x):
-        # 禁止任何 new 层或 new 张量
-        # print('forward 内 W1 data_ptr:', self.W1.weight.data_ptr())
-        print('inside W1 requires_grad:', self.W1.weight.requires_grad,
-          'data_ptr:', self.W1.weight.data_ptr())
-        x = x.transpose(1, 2)
-        x = self.W2(self.W1(x))
-        return x.transpose(1, 2)
-    
-# 验证：强制让低秩层输出直接计算损失
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-layer = LowRankLinear(192, 192, 32).to(DEVICE)
-x = torch.randn(2, 50, 192).to(DEVICE)
+        # x: [B, ..., in_features]，对最后一维做低秩线性变换
+        return self.W2(self.W1(x))   
 
-# 前向传播：直接使用低秩层输出
-out = layer(x)
-# 损失：直接基于低秩层输出计算（无其他链路干扰）
-loss = out.sum()
-
-# 反向传播
-layer.zero_grad()
-loss.backward()
-
-# 查看梯度
-if layer.W1.weight.grad is None:
-    print("❌ 即使强制使用输出，梯度仍为None，说明层自身有问题")
-else:
-    print(f"✅ 梯度正常！说明原问题是低秩层输出未被用于损失计算")
-    print(f"W1梯度均值：{layer.W1.weight.grad.abs().mean().item()}")
-    
 class Encoder(nn.Module):
   def __init__(self, hidden_channels, filter_channels, n_heads, n_layers, kernel_size=1, p_dropout=0., window_size=4, **kwargs):
     super().__init__()
@@ -70,7 +52,7 @@ class Encoder(nn.Module):
       self.ffn_layers.append(FFN(hidden_channels, hidden_channels, filter_channels, kernel_size, p_dropout=p_dropout))
       self.norm_layers_2.append(LayerNorm(hidden_channels))
 
-  def forward(self, x, x_mask, g= None):
+  def forward(self, x, x_mask):
     attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
     x = x * x_mask
     for i in range(self.n_layers):
@@ -153,10 +135,9 @@ class MultiHeadAttention(nn.Module):
     self.attn = None
 
     self.k_channels = channels // n_heads
-    # ========== 核心修改1：替换 nn.Conv1d 为 LowRankLinear ==========
-    self.conv_q = LowRankLinear(channels, channels, rank=32)
-    self.conv_k = LowRankLinear(channels, channels, rank=32)
-    self.conv_v = LowRankLinear(channels, channels, rank=32)
+    self.conv_q = nn.Conv1d(channels, channels, 1)
+    self.conv_k = nn.Conv1d(channels, channels, 1)
+    self.conv_v = nn.Conv1d(channels, channels, 1)
     self.conv_o = nn.Conv1d(channels, out_channels, 1)
     self.drop = nn.Dropout(p_dropout)
 
@@ -166,35 +147,21 @@ class MultiHeadAttention(nn.Module):
       self.emb_rel_k = nn.Parameter(torch.randn(n_heads_rel, window_size * 2 + 1, self.k_channels) * rel_stddev)
       self.emb_rel_v = nn.Parameter(torch.randn(n_heads_rel, window_size * 2 + 1, self.k_channels) * rel_stddev)
 
-    # ========== 保留原初始化逻辑，适配 LowRankLinear ==========
-    # 对 LowRankLinear 的 W1/W2 进行 xavier 初始化（和原卷积层初始化一致）
-    nn.init.xavier_uniform_(self.conv_q.W1.weight)
-    nn.init.xavier_uniform_(self.conv_q.W2.weight)
-    nn.init.xavier_uniform_(self.conv_k.W1.weight)
-    nn.init.xavier_uniform_(self.conv_k.W2.weight)
-    nn.init.xavier_uniform_(self.conv_v.W1.weight)
-    nn.init.xavier_uniform_(self.conv_v.W2.weight)
-    # 保留 proximal_init 逻辑
+    nn.init.xavier_uniform_(self.conv_q.weight)
+    nn.init.xavier_uniform_(self.conv_k.weight)
+    nn.init.xavier_uniform_(self.conv_v.weight)
     if proximal_init:
       with torch.no_grad():
-        # 复制 conv_q 的权重到 conv_k
-        self.conv_k.W1.weight.copy_(self.conv_q.W1.weight)
-        self.conv_k.W2.weight.copy_(self.conv_q.W2.weight)
-        self.conv_k.W2.bias.copy_(self.conv_q.W2.bias)
+        self.conv_k.weight.copy_(self.conv_q.weight)
+        self.conv_k.bias.copy_(self.conv_q.bias)
       
-  # ========== 核心修改2：替换 forward 函数为指定版本 ==========
   def forward(self, x, c, attn_mask=None):
-    # x, c: [B, C, T]
-    B, C, T = x.shape
+    q = self.conv_q(x)
+    k = self.conv_k(c)
+    v = self.conv_v(c)
     
-    x_t = x.transpose(1,2)    # [B, T, C]
-    c_t = c.transpose(1,2)
-
-    q = self.conv_q(x_t).transpose(1,2)
-    k = self.conv_k(c_t).transpose(1,2)
-    v = self.conv_v(c_t).transpose(1,2)
-
     x, self.attn = self.attention(q, k, v, mask=attn_mask)
+
     x = self.conv_o(x)
     return x
 

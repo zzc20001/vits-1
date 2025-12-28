@@ -1,0 +1,38 @@
+{
+    "text50_bs1": {
+        "latency_ms_per_sample": 6.213,
+        "qps": 160.95
+    },
+    "text50_bs4": {
+        "latency_ms_per_sample": 3.965,
+        "qps": 252.21
+    },
+    "text50_bs8": {
+        "latency_ms_per_sample": 3.458,
+        "qps": 289.21
+    },
+    "text100_bs1": {
+        "latency_ms_per_sample": 9.133,
+        "qps": 109.5
+    },
+    "text100_bs4": {
+        "latency_ms_per_sample": 7.065,
+        "qps": 141.55
+    },
+    "text100_bs8": {
+        "latency_ms_per_sample": 6.542,
+        "qps": 152.87
+    },
+    "text200_bs1": {
+        "latency_ms_per_sample": 15.891,
+        "qps": 62.93
+    },
+    "text200_bs4": {
+        "latency_ms_per_sample": 13.267,
+        "qps": 75.38
+    },
+    "text200_bs8": {
+        "latency_ms_per_sample": 12.678,
+        "qps": 78.88
+    }
+}
